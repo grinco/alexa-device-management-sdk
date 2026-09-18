@@ -216,6 +216,125 @@ def cmd_delete(args) -> int:
     return 0 if failed == 0 else 1
 
 
+# --------------------------------------------------------------------------
+# Session management
+#
+# There is deliberately NO login flow here. Amazon's sign-in is MFA-protected
+# and actively hostile to scripting (CAPTCHA, device registration, rotating
+# challenges). Scripting it means taking on `alexapy`-sized complexity AND the
+# cookie-clobbering hazard documented at the top of this file.
+#
+# A session therefore comes from one of two places, both of which let a human
+# clear MFA in a real browser, once:
+#   1. Home Assistant's `alexa_media` integration, read-only (default).
+#   2. `import-cookies`, from a browser cookie export.
+# --------------------------------------------------------------------------
+
+HA_STORAGE_MARKERS = (".storage", "alexa_media.")
+
+
+def _refuse_ha_path(path: str) -> None:
+    """Never let this tool write anything that looks like the integration's jar."""
+    resolved = os.path.abspath(path)
+    if all(m in resolved for m in HA_STORAGE_MARKERS) or resolved.endswith(".cookies"):
+        raise AlexaError(
+            f"refusing to write {resolved}\n"
+            "That path looks like Home Assistant's alexa_media cookie file. Overwriting it "
+            "logs the account out. Write somewhere else and pass it with --cookies."
+        )
+
+
+def cmd_auth_status(args) -> int:
+    """Report on the session jar without revealing it. Read-only."""
+    import datetime
+
+    path = resolve_cookie_path(args.cookies)
+    with open(path, "r", encoding="utf-8") as fh:
+        blob = json.load(fh)
+    cookies = blob.get("cookies") or []
+
+    print(f"jar:     {path}")
+    print(f"format:  {blob.get('format')} v{blob.get('version')}")
+    print(f"cookies: {len(cookies)}")
+    if os.path.getsize(path) < 200:
+        print("\n!! This jar is suspiciously small. If it is ~58 bytes it was clobbered —\n"
+              "   reload the alexa_media config entry NOW, before any restart.")
+
+    have = {c.get("name") for c in cookies}
+    for required in ("csrf", "at-main", "session-id"):
+        print(f"  {required:<12} {'present' if required in have else 'MISSING'}")
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    soonest = None
+    for c in cookies:
+        raw = c.get("expiration") or c.get("expires")
+        if not raw:
+            continue
+        for fmt in ("%a, %d-%b-%Y %H:%M:%S GMT", "%d %b %Y %H:%M:%S GMT", "%a, %d %b %Y %H:%M:%S GMT"):
+            try:
+                when = datetime.datetime.strptime(str(raw).strip(), fmt).replace(tzinfo=datetime.timezone.utc)
+                break
+            except ValueError:
+                when = None
+        if when and (soonest is None or when < soonest):
+            soonest = when
+    if soonest:
+        print(f"\nearliest expiry: {soonest:%Y-%m-%d} ({(soonest - now).days} days)")
+    print("\nNote: while Home Assistant's alexa_media integration is running it re-stamps\n"
+          "this session periodically, so it does not normally need renewing by hand.")
+    return 0
+
+
+def cmd_import_cookies(args) -> int:
+    """Convert a browser cookie export into a jar this tool can use.
+
+    Do the login (and the MFA) in a normal browser, then export cookies for
+    amazon.com with any 'cookies.txt' extension. Netscape format:
+        domain  flag  path  secure  expiry  name  value      (tab separated)
+    """
+    _refuse_ha_path(args.out)
+
+    cookies = []
+    with open(args.from_file, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            http_only = line.startswith("#HttpOnly_")
+            if http_only:
+                line = line[len("#HttpOnly_"):]
+            elif line.startswith("#") or not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) != 7:
+                continue
+            domain, _flag, path_, secure, expiry, name, value = parts
+            if "amazon." not in domain:
+                continue
+            cookies.append({
+                "name": name, "value": value, "domain": domain.lstrip("."),
+                "path": path_ or "/", "secure": secure.upper() == "TRUE",
+                "httponly": http_only,
+                "expires": int(expiry) if expiry.isdigit() and expiry != "0" else None,
+            })
+
+    if not cookies:
+        raise AlexaError(
+            f"no amazon.* cookies found in {args.from_file}. Expected Netscape cookies.txt "
+            "(tab separated). Make sure you exported while logged in to the Alexa site."
+        )
+    if not any(c["name"] == "csrf" for c in cookies):
+        raise AlexaError(
+            "the export has no 'csrf' cookie. It is set by the Alexa web app, not the Amazon "
+            "storefront — visit alexa.amazon.com (and let it finish loading) before exporting."
+        )
+
+    with open(args.out, "w", encoding="utf-8") as fh:
+        json.dump({"format": "alexapy.cookies", "version": 1, "cookies": cookies}, fh, indent=1)
+    os.chmod(args.out, 0o600)
+    print(f"wrote {len(cookies)} cookies to {args.out} (mode 0600)")
+    print(f"use it with:  {os.path.basename(sys.argv[0])} --cookies {args.out} list")
+    return 0
+
+
 def resolve_cookie_path(explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -245,6 +364,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--id", action="append", required=True)
     s.set_defaults(func=cmd_state)
 
+    s = sub.add_parser("auth-status", help="report on the session jar (read-only, reveals no values)")
+    s.set_defaults(func=cmd_auth_status)
+
+    s = sub.add_parser("import-cookies", help="build a jar from a browser cookie export (do MFA in the browser)")
+    s.add_argument("--from-file", required=True, metavar="cookies.txt", help="Netscape-format export")
+    s.add_argument("--out", required=True, help="where to write the jar (NOT Home Assistant's .storage)")
+    s.set_defaults(func=cmd_import_cookies)
+
     s = sub.add_parser("delete", help="delete devices (dry run unless --yes)")
     s.add_argument("--id", action="append", default=[])
     s.add_argument("--from-file", help="file of applianceIds, one per line, # comments allowed")
@@ -255,7 +382,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     try:
-        args._session = load_session(resolve_cookie_path(args.cookies))
+        if args.cmd not in ("import-cookies", "auth-status"):
+            args._session = load_session(resolve_cookie_path(args.cookies))
         return args.func(args)
     except AlexaError as exc:
         print(f"error: {exc}", file=sys.stderr)

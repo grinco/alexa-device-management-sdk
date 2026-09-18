@@ -58,6 +58,55 @@ Options worth knowing:
 | `--sleep S` | Pause between deletes (default 0.1 s) |
 | `--query-file` | Point at your own GraphQL query if Amazon changes the schema |
 
+## Authentication
+
+**There is no login flow in this tool, on purpose.** Amazon's sign-in is
+MFA-protected and actively hostile to scripting — CAPTCHA, device registration,
+rotating challenges. Automating it means taking on `alexapy`-sized complexity plus
+the cookie-clobbering hazard above. So a human clears MFA in a real browser, once,
+and the tool borrows the resulting session.
+
+Two supported ways to get one:
+
+**A. Reuse Home Assistant's session (default, nothing to do)**
+
+If `alexa_media` is set up it already holds a valid session and **re-stamps it
+periodically**, so it does not normally need renewing by hand. Observed on a live
+install: 13 cookies, all expiring a year out, the file re-written the same day.
+
+```bash
+./alexa_devices.py auth-status     # read-only; reports health, never prints values
+```
+
+**B. Import from a browser (no Home Assistant needed)**
+
+1. Log in to `alexa.amazon.com` in a normal browser and let the app finish loading.
+   MFA happens here, in Amazon's own UI, where it belongs.
+2. Export cookies for `amazon.com` with any *cookies.txt* browser extension
+   (Netscape format).
+3. Convert and use:
+
+```bash
+./alexa_devices.py import-cookies --from-file cookies.txt --out ~/.alexa-session.json
+./alexa_devices.py --cookies ~/.alexa-session.json list
+```
+
+The jar is written mode `0600`. `import-cookies` **refuses to write to anything that
+looks like Home Assistant's `.storage`**, so it cannot clobber the integration's
+session by accident.
+
+The `csrf` cookie is set by the Alexa web app, not the Amazon storefront — if the
+import complains it is missing, you exported from `amazon.com` rather than
+`alexa.amazon.com`.
+
+### Session lifetime
+
+Cookies carry roughly a one-year expiry, but Amazon can invalidate a session earlier
+(password change, sign-out-everywhere, suspicious-activity checks). There is no
+refresh path here: when a session dies, `list` starts failing and you re-import from
+the browser, or let `alexa_media` re-establish it. `auth-status` tells you what you
+are holding.
+
 ## Safety
 
 Deletion is **irreversible**. Deleted devices must be rediscovered, and any routines,

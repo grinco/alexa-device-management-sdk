@@ -51,6 +51,28 @@ empty jar and lose the session for good.
 So: open the cookie file `"r"`, never `"w"`. If you are writing a tool, put that in
 a comment at the top so the next person does not "helpfully" add a refresh path.
 
+## 1b. There is no login flow — and should not be
+
+Amazon sign-in is MFA-protected and actively anti-scripting (CAPTCHA, device
+registration, rotating challenges). Do not build one into a tool like this: it is
+`alexapy`-sized complexity, it breaks whenever Amazon changes the flow, and the
+library that does implement it is exactly what clobbers cookie files.
+
+Let a human clear MFA in a browser once, then consume the session:
+
+- **Reuse the `alexa_media` jar** (above). While the integration runs it re-stamps
+  the session periodically — observed: 13 cookies, ~1 year expiry, file re-written
+  the same day — so it rarely needs manual renewal.
+- **Or import a browser cookie export** (Netscape `cookies.txt` for `amazon.com`).
+  Write the converted jar somewhere the integration does not own, mode `0600`, and
+  make the importer *refuse* paths that look like HA's `.storage`.
+
+The `csrf` cookie is set by the Alexa web app, not the storefront — an export taken
+from `amazon.com` will be missing it and every write will be rejected.
+
+Sessions can die early (password change, sign-out-everywhere). There is no refresh
+path; the recovery is re-import or let the integration re-establish it.
+
 ## 2. The three endpoints
 
 Base host is your marketplace's, e.g. `https://alexa.amazon.com` (`.de`, `.co.uk`, …).
