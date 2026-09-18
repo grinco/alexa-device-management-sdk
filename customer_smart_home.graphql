@@ -1,0 +1,19 @@
+query CustomerSmartHome {
+  endpoints(endpointsQueryParams: { paginationParams: { disablePagination: true } }) {
+    items {
+      endpointId
+      friendlyName
+      legacyAppliance {
+        applianceId
+        applianceTypes
+        friendlyName
+        friendlyDescription
+        manufacturerName
+        modelName
+        entityId
+        connectedVia
+        mergedApplianceIds
+      }
+    }
+  }
+}
