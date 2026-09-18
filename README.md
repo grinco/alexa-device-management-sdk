@@ -94,3 +94,10 @@ This is why the tool never opens that file for writing, and why you should not a
 This talks to **your own account, with your own session**, to manage **your own
 registered devices**. It is an administrative convenience for data you already own,
 not a way to reach anything you do not.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Not affiliated with, endorsed by, or supported by Amazon. "Alexa" and "Amazon" are
+trademarks of Amazon.com, Inc. or its affiliates.
